@@ -1,30 +1,46 @@
 import sys
+from socket import *
+
 
 def parse_uri(uri):
     # URI format: protocol://host[:port]/filepath
     # NOTE ADD HANDLING FOR URI'S WITH NO PORT
 
-    uri_data = []
+    uri_data = {}
 
-    uri = uri.split("://")
-    uri_data.append(uri[0])
-    print(uri[0])
+    uri = uri.split("://", 1)
+    uri_data["protocol"] = uri[0]
+    print(uri_data["protocol"])
 
-    uri = uri[1].split("[:")
-    uri_data.append(uri[0])
-    print(uri[0])
 
-    uri = uri[1].split("]/")
-    uri_data.append(uri[0])
-    print(uri[0])
+    if ":" in uri[1]:
+        uri = uri[1].split("[:", 1)
+        uri_data["host"] = uri[0]
+        print(uri_data["host"])
 
-    uri = uri[1].split("]/")
-    uri_data.append(uri[0])
-    print(uri[0])
+        uri = uri[1].split("]/", 1)
+        uri_data["port"] = uri[0]
+        print(uri_data["port"])
+    else:
+        uri = uri[1].split("/", 1)
+        uri_data["host"] = uri[0]
+        print(uri_data["host"])
+
+        if uri_data["protocol"] == "https":
+            uri_data["port"] = 443
+        else:
+            uri_data["port"] = 80
+
+    uri = uri[1].split("]/", 1)
+    uri_data["filepath"] = uri[0]
+    print(uri_data["filepath"])
 
     return uri_data
 
 def open_connection(host, port, use_tls):
+    s = socket(AF_INET, SOCK_STREAM)
+    s.connect((host, port))
+    
     return
 
 def send_http_request(socket, request):
