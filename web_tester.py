@@ -3,22 +3,21 @@ from socket import *
 import ssl
 
 
-
 def parse_uri(uri):
     # URI format: protocol://host[:port]/filepath
     # NOTE ADD HANDLING FOR URI'S WITH NO PORT
 
     uri_data = {}
 
+    if not uri.endswith("/"):
+        uri += "/"
+
     uri = uri.split("://", 1)
     uri_data["protocol"] = uri[0]
-    # print(uri_data["protocol"])
-
 
     if ":" in uri[1]:
         uri = uri[1].split("[:", 1)
         uri_data["host"] = uri[0]
-        # print(uri_data["host"])
 
         uri = uri[1].split("]/", 1)
         uri_data["port"] = uri[0]
@@ -26,7 +25,6 @@ def parse_uri(uri):
     else:
         uri = uri[1].split("/", 1)
         uri_data["host"] = uri[0]
-        # print(uri_data["host"])
 
         if uri_data["protocol"] == "https":
             uri_data["port"] = 443
@@ -35,9 +33,6 @@ def parse_uri(uri):
 
     uri = uri[1].split("]/", 1)
     uri_data["filepath"] = "/" + uri[0]
-    # print(uri_data["filepath"])
-
-    print(uri_data)
 
     return uri_data
 
@@ -52,6 +47,7 @@ def open_connection(host, port, use_tls):
     # if https use tls
     if use_tls:
         context = ssl.create_default_context()
+        # Perform TLS handshake
         s = context.wrap_socket(s, server_hostname=host)
 
     return s
@@ -67,24 +63,20 @@ def make_request(host, filepath):
 
 def send_http_request(s, request):
     s.sendall(request.encode())
-    print(request)
+    return s, request
 
-    return s
-
-def receive_request(socket):
+def receive_request(s):
 
     response = b""
 
     # loop through the chunks of 4096 bytes until data is empty
     while 1:
-        data = socket.recv(4096)
-        # print(data.decode())
-        print(data.decode("utf-8", errors="replace"), end="")
+        data = s.recv(4096)
         if not data:
             break
         response += data
 
-    socket.close()
+    s.close()
     return response
 
 def parse_response(response):
@@ -111,37 +103,65 @@ def parse_response(response):
     for line in header_lines[1:]:
         if ":" in line:
             data = line.split(":", 1)
-            key = data[0]
-            value = data[1]
-            headers[key.strip().lower()] = value.strip()
+            key = data[0].strip().lower()
+            value = data[1].strip()
+
+            if key not in headers:
+                headers[key] = []
+
+            headers[key].append(value)
 
     response_data["headers"] = headers
 
     return response_data
 
 def handle_redirects(response):
-    # All codes related to redirects
-    redirect_codes = {301, 302, 303, 307, 308}
+    redirect_codes = {"301", "302", "303", "307", "308"}
 
     if response["status_code"] in redirect_codes:
-        return response["headers"].get("location")
+        locations = response["headers"].get("location", [])
+
+        if locations:
+            return locations[0]
 
     return None
 
-def check_http2_support(response):
-    # check for ...
-    alt_svc = response["headers"].get("alt-svc", "")
-    http2_support = "h2=" in alt_svc
-    return http2_support
+def check_http2_support(host, port, use_tls): # check for http2 support (h2)
+
+    # create socket
+    s = socket(AF_INET, SOCK_STREAM)
+
+    # establish a connection
+    s.connect((host, port))
+
+    # if https use tls
+    if use_tls:
+        context = ssl.create_default_context()
+
+        # Configure ALPN BEFORE the TLS handshake
+        context.set_alpn_protocols(["h2", "http/1.1"])
+
+        # Perform TLS handshake
+        s = context.wrap_socket(s, server_hostname=host)
+    
+        return True
+
+    s.close()
+
+    return False
 
 def extract_cookies(headers):
-    return
+    cookies = []
+
+    for cookie in headers.get("set-cookie", []):
+        cookies.append("Set-Cookie: " + cookie)
+
+    return cookies
 
 def check_password_protection(status_code):
-    return
+    return status_code == "401"
 
 def main():
-    print("======================\n")
 
     # require a valid input
     if len(sys.argv) < 2:
@@ -161,43 +181,61 @@ def main2(unparsed_uri, redirect_count):
     
     parsed_uri = parse_uri(unparsed_uri)
 
-    print("\n======================\n")
-
     # Send data from URI to socket function
     socket = open_connection(parsed_uri["host"], parsed_uri["port"], parsed_uri["protocol"] == "https")
 
     # make/send request
     request = make_request(parsed_uri["host"], parsed_uri["filepath"])
-    send_http_request(socket, request)
-
-    print("======================\n")
+    s, send_request = send_http_request(socket, request)
 
     response = receive_request(socket)
 
-    print("\n======================\n")
-
     response_data = parse_response(response)
-    print(response_data)
-
-    print("\n======================\n")
 
     # check for redirects, if so start over with new URI
     redirect = handle_redirects(response_data)
     if redirect:
-        print("Redirect: True")
-        print("Total redirect count:", redirect_count)
         redirect_count += 1
         main2(redirect, redirect_count) # Restart with new URI but ignore comandline input (main())
-    else:
-        print("Redirect: False")
-        print("Total redirect count:", redirect_count)
+        return
 
-    print("\n======================\n")
+    http2_support = check_http2_support(parsed_uri["host"], parsed_uri["port"], parsed_uri["protocol"] == "https")
 
-    http2_support = check_http2_support(response_data)
+    cookies = extract_cookies(response_data["headers"])
+
+    check_password = check_password_protection(response_data["status_code"])
+
+    print("=== Request begin ===\n")
+    print(send_request)
+
+    print("=== Request end ===\n")
+    print("RECEIVING RESPONSE...")
+
+    print("\n\n=== Response header ===\n")
+    for header, values in response_data["headers"].items():
+        if header == "set-cookie":
+            continue
+
+        print(header + ": " + values[0])
+
+    print("\n\n=== Cookies ===\n")
+    for cookie in cookies:
+        print(cookie)
+        print()
+
+    print("\n=== HTTP2 support ===\n")
     print("http2 support:", http2_support)
 
-    print("\n======================\n")
+    print("\n\n=== Check password ===\n")
+    print("Password protected:", check_password)
+
+    print("\n\n=== Redirects ===\n")
+    if redirect:
+        print("Total redirect count:", redirect_count)
+    else:
+        print("Total redirect count:", redirect_count)
+
+    print("\n")
 
     return
 
