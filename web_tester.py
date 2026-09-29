@@ -5,7 +5,6 @@ import ssl
 
 def parse_uri(uri):
     # URI format: protocol://host[:port]/filepath
-    # NOTE ADD HANDLING FOR URI'S WITH NO PORT
 
     uri_data = {}
 
