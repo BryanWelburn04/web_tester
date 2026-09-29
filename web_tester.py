@@ -9,30 +9,42 @@ def parse_uri(uri):
 
     uri_data = {}
 
-    if not uri.endswith("/"):
-        uri += "/"
-
+    # Split the protocol
     uri = uri.split("://", 1)
     uri_data["protocol"] = uri[0]
 
+    # If a port is given, use it...
+    # Otherwise set the port to default value based on whether it's http or https
     if ":" in uri[1]:
+        # Split host
         uri = uri[1].split("[:", 1)
         uri_data["host"] = uri[0]
 
+        # Split port and filepath
         uri = uri[1].split("]/", 1)
-        uri_data["port"] = uri[0]
-        print(uri_data["port"])
-    else:
-        uri = uri[1].split("/", 1)
-        uri_data["host"] = uri[0]
+        uri_data["port"] = int(uri[0])
 
+        # Split the filepath
+        uri_data["filepath"] = "/" + uri[1]
+
+    else:
+        # Split host and filepath
+        if "/" in uri[1]:
+            uri = uri[1].split("/", 1)
+            uri_data["host"] = uri[0]
+
+            # Keep the filepath exactly as provided
+            uri_data["filepath"] = "/" + uri[1]
+        else:
+            # URI has no filepath
+            uri_data["host"] = uri[1]
+            uri_data["filepath"] = "/"
+
+        # Add port based off protocol type
         if uri_data["protocol"] == "https":
             uri_data["port"] = 443
         else:
             uri_data["port"] = 80
-
-    uri = uri[1].split("]/", 1)
-    uri_data["filepath"] = "/" + uri[0]
 
     return uri_data
 
@@ -42,7 +54,17 @@ def open_connection(host, port, use_tls):
     s = socket(AF_INET, SOCK_STREAM)
 
     # establish a connection
-    s.connect((host, port))
+    try:
+        s.connect((host, port))
+    except gaierror:
+        print("Error: Could not resolve hostname:", host)
+        return None
+    except timeout:
+        print("Error: Connection timed out")
+        return None
+    except OSError as e:
+        print("Error: Could not connect to", host, ":", e)
+        return None
 
     # if https use tls
     if use_tls:
@@ -116,8 +138,10 @@ def parse_response(response):
     return response_data
 
 def handle_redirects(response):
+    # All redirect codes
     redirect_codes = {"301", "302", "303", "307", "308"}
 
+    # Locate and return the new URI to redirect to
     if response["status_code"] in redirect_codes:
         locations = response["headers"].get("location", [])
 
@@ -132,13 +156,23 @@ def check_http2_support(host, port, use_tls): # check for http2 support (h2)
     s = socket(AF_INET, SOCK_STREAM)
 
     # establish a connection
-    s.connect((host, port))
-
+    try:
+        s.connect((host, port))
+    except gaierror:
+        print("Error: Could not resolve hostname:", host)
+        return None
+    except timeout:
+        print("Error: Connection timed out")
+        return None
+    except OSError as e:
+        print("Error: Could not connect to", host, ":", e)
+        return None
+    
     # if https use tls
     if use_tls:
         context = ssl.create_default_context()
 
-        # Configure ALPN BEFORE the TLS handshake
+        # Configure ALPN before the TLS handshake
         context.set_alpn_protocols(["h2", "http/1.1"])
 
         # Perform TLS handshake
@@ -153,13 +187,22 @@ def check_http2_support(host, port, use_tls): # check for http2 support (h2)
 def extract_cookies(headers):
     cookies = []
 
+    # Extract all the cookies from the header data and add them to a list
     for cookie in headers.get("set-cookie", []):
         cookies.append("Set-Cookie: " + cookie)
 
     return cookies
 
-def check_password_protection(status_code):
-    return status_code == "401"
+def check_password_protection(status_code, response):
+    # If status code '401' is returned that means that the web page is password protected
+    if status_code == "401":
+        return True
+    
+    if "www-authenticate" in response["headers"]:
+        return True
+
+    return False
+
 
 def main():
 
@@ -171,25 +214,33 @@ def main():
         print("Error: Too many arguements provided, please provide only a URI")
         return
 
-    # parse and store URI data
+    # Get URI from command line
     unparsed_uri = sys.argv[1]
     main2(unparsed_uri, 0)
 
     return
 
 def main2(unparsed_uri, redirect_count):
-    
+
+    # If the web page redirects over 100 times, give timeout error to stop the program from getting suck in a infinite loop
+    if redirect_count > 100:
+        print("Error: too many redirects, connection timed out.")
+        return
+
+    # parse and store URI data
     parsed_uri = parse_uri(unparsed_uri)
 
     # Send data from URI to socket function
     socket = open_connection(parsed_uri["host"], parsed_uri["port"], parsed_uri["protocol"] == "https")
+    if socket is None:
+        return
 
     # make/send request
     request = make_request(parsed_uri["host"], parsed_uri["filepath"])
     s, send_request = send_http_request(socket, request)
 
+    # Receive and parse response
     response = receive_request(socket)
-
     response_data = parse_response(response)
 
     # check for redirects, if so start over with new URI
@@ -199,12 +250,18 @@ def main2(unparsed_uri, redirect_count):
         main2(redirect, redirect_count) # Restart with new URI but ignore comandline input (main())
         return
 
+    # Create another connection configured with ALPN for a list of supported protocols
     http2_support = check_http2_support(parsed_uri["host"], parsed_uri["port"], parsed_uri["protocol"] == "https")
+    if http2_support is None:
+        return
 
+    # Extract and format cookies from headers
     cookies = extract_cookies(response_data["headers"])
 
-    check_password = check_password_protection(response_data["status_code"])
+    # Check response status code for password protection
+    check_password = check_password_protection(response_data["status_code"], response_data)
 
+    # Formatted data section
     print("=== Request begin ===\n")
     print(send_request)
 
@@ -212,6 +269,11 @@ def main2(unparsed_uri, redirect_count):
     print("RECEIVING RESPONSE...")
 
     print("\n\n=== Response header ===\n")
+    print(
+        response_data["version"],
+        response_data["status_code"],
+        response_data["reason"]
+    )
     for header, values in response_data["headers"].items():
         if header == "set-cookie":
             continue
